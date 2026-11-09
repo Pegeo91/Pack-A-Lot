@@ -133,7 +133,7 @@ in the PSADT script step to stop saving for one package.
 
 Set **Custom package folder** in the Build step, or a default for new packages in **Settings**. After each build,
 the PSADT package and the `.intunewin` are also copied to `<folder>\<App>\<Version>\`. A UNC path such as
-`\server\Packages` works too.
+`\\server\Packages` works too.
 
 ## How the generated script works
 
@@ -158,3 +158,30 @@ PSADT logs are copied back to `test\results\logs`.
 ## Upload notes
 * **Device code**: the sign-in code appears in the upload log.
 * If an upload fails before the content is committed, the half-created app is deleted from Intune.
+
+## TL;DR
+
+**What it does:** pick an app from winget (or your own installer), build a PSADT v4 package, test it in Windows
+Sandbox, upload it to Intune. All from a step-by-step wizard in your browser.
+
+**Get started:**
+1. Clone the repo.
+2. Get the program:
+   - **Python installed:** run `build_exe.cmd` to build `Pack-A-Lot.exe`.
+   - **No Python:** run `Prepare-Portable.ps1`. It downloads a portable Python and IntuneWinAppUtil.
+3. Run `Setup.cmd`. It checks the PC (Windows Sandbox, virtualization, winget, Graph module, network) and fixes what
+   it can, then starts Pack-A-Lot at http://127.0.0.1:5050.
+4. Fill in your tenant and client ID, in `config.yaml` (created on first start) or on the Upload step. Or skip this
+   and use interactive sign-in.
+
+**You need:**
+- Windows 10/11 Pro, Enterprise or Education (Windows Home can't run Windows Sandbox).
+- Virtualization enabled in BIOS/UEFI.
+- An account or app registration with `DeviceManagementApps.ReadWrite.All`, plus `Group.Read.All` if you assign
+  groups by name.
+
+**Good to know:**
+- Packages live in `%LOCALAPPDATA%\PackALot\workspace`.
+- Your customizations for an app are re-used for its next version.
+- The client secret is never saved to disk.
+- **System check** on the home page tells you what's missing.
