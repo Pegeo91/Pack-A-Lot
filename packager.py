@@ -12,6 +12,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
+import profiles
 import psadt_script
 import winget_client
 from common import (SCRIPTS_DIR, LogFn, capture, job_dir, load_job, load_settings, powershell_cmd,
@@ -87,6 +88,7 @@ def prepare_source(job: dict, log: LogFn) -> dict:
 
     # Auto-generated defaults: replace only when the user hasn't customised them
     _apply_defaults(job)
+    profiles.apply_profile(job, log)  # same customisations as the previous version of this app
     job["status"].update({"fetched": True, "fetched_source": dict(src), "packaged": False, "tested": None,
                           "uploaded": False})
     log("Source ready.")
@@ -214,6 +216,36 @@ def build_package(job: dict, log: LogFn) -> dict:
 
     job["status"].update({"packaged": True, "package_dir": str(pkg), "intunewin": str(final),
                           "tested": None, "test_result": None, "uploaded": False})
+    if job.get("package", {}).get("output_dir", "").strip():
+        try:
+            export_package(job, log)
+        except Exception as exc:  # noqa: BLE001 - the build itself succeeded
+            log(f"WARNING: could not copy the package to the custom folder: {exc}")
+    profiles.save_profile(job, log)
+    return job
+
+
+def export_package(job: dict, log: LogFn) -> dict:
+    """Copy the built package + .intunewin to <output_dir>/<Vendor App>/<Version>/."""
+    root = job.get("package", {}).get("output_dir", "").strip().strip('"')
+    if not root:
+        raise ValueError("No custom package folder set.")
+    s = job["status"]
+    if not s.get("package_dir") or not Path(s["package_dir"]).is_dir() or not Path(s.get("intunewin", "")).is_file():
+        raise RuntimeError("Build the package first.")
+    a = job["app"]
+    vendor, name = (a.get("vendor") or "").strip(), (a.get("name") or "").strip()
+    if vendor and name.lower().startswith(vendor.lower()):
+        vendor = ""
+    target = Path(root) / safe_name(" ".join(x for x in (vendor, name) if x) or "App") / safe_name(a.get("version") or "unversioned")
+    if target.exists():
+        remove_tree(target)
+    target.mkdir(parents=True)
+    log(f"Copying package to {target}")
+    shutil.copytree(s["package_dir"], target / "Package")
+    shutil.copy2(s["intunewin"], target / Path(s["intunewin"]).name)
+    s["export_dir"] = str(target)
+    log(f"Package copied to {target}")
     return job
 
 

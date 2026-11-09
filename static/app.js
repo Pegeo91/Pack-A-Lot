@@ -94,6 +94,7 @@ function fieldChanged(path, evType) {
   if (/^detection\.rules\.\d+\.(type|detection_type|version_operator)$/.test(path)) renderRules();
   else if (/^detection\.rules\.\d+\.(version|product_code)$/.test(path) && evType === 'change') renderRules();
   if (path.startsWith('app.')) updateTitle();
+  if (path === 'package.output_dir') renderExportHint();
 }
 
 function scheduleSave() {
@@ -105,7 +106,7 @@ async function saveNow() {
   clearTimeout(saveTimer);
   if (!job) return;
   job.step = step;
-  const saved = await api.put(`/api/jobs/${job.id}`, job);
+  const saved = await api.put(`/api/jobs/${encodeURIComponent(job.id)}`, job);
   job.status = saved.status;
   $('#saveState').textContent = 'Saved';
   renderStepper();
@@ -148,7 +149,7 @@ async function goStep(n) {
   $('#btnBack').disabled = n === 1;
   $('#btnNext').classList.toggle('hidden', n === STEPS.length);
   $('#btnFinish').classList.toggle('hidden', n !== STEPS.length);
-  location.hash = `job=${job.id}&step=${n}`;
+  location.hash = `job=${encodeURIComponent(job.id)}&step=${n}`;
   renderStepper();
   window.scrollTo({ top: 0 });
   await RENDER[n]?.();
@@ -196,7 +197,7 @@ const BEFORE_NEXT = {
 // ============================================================================ tasks
 function setBusy(b) {
   busy = b;
-  $$('#btnNext, #btnBack, #btnBuild, #btnTest, #btnUpload').forEach(x => (x.disabled = b || (x.id === 'btnBack' && step === 1)));
+  $$('#btnNext, #btnBack, #btnBuild, #btnTest, #btnUpload, #btnExport').forEach(x => (x.disabled = b || (x.id === 'btnBack' && step === 1)));
   $('#saveState').textContent = b ? 'Working…' : '';
 }
 
@@ -207,7 +208,7 @@ async function runTask(name, body) {
   logEl.innerHTML = '';
   setBusy(true);
   try {
-    await api.post(`/api/jobs/${job.id}/tasks/${name}`, body);
+    await api.post(`/api/jobs/${encodeURIComponent(job.id)}/tasks/${name}`, body);
   } catch (e) {
     setBusy(false);
     toast(e.message, true);
@@ -225,7 +226,7 @@ async function followTask(name) {
   try {
     for (;;) {
       if (job?.id !== jobId) return false;  // user went Home / opened another package
-      const t = await api.get(`/api/jobs/${jobId}/task?offset=${offset}`);
+      const t = await api.get(`/api/jobs/${encodeURIComponent(jobId)}/task?offset=${offset}`);
       if (job?.id !== jobId) return false;
       appendLog(logEl, t.log);
       offset = t.offset;
@@ -252,12 +253,12 @@ function appendLog(el, lines) {
 }
 
 async function attachRunningTask() {
-  const t = await api.get(`/api/jobs/${job.id}/task?offset=0`);
+  const t = await api.get(`/api/jobs/${encodeURIComponent(job.id)}/task?offset=0`);
   if (t.state === 'running') followTask(t.name);
 }
 
 async function reloadJob() {
-  job = await api.get(`/api/jobs/${job.id}`);
+  job = await api.get(`/api/jobs/${encodeURIComponent(job.id)}`);
   bindAll();
   renderStepper();
   updateTitle();
@@ -268,7 +269,7 @@ async function reloadJob() {
 const RENDER = {
   1: () => { renderSourcePanels(); if (job.source.winget_id) loadVersions(); loadInstallerPreview(); },
   2: renderAppDetails,
-  3: () => {},
+  3: renderProfileInfo,
   4: () => { refreshCommandPreview(); renderRules(); renderReturnCodes(); },
   5: renderBuild,
   6: renderTestResult,
@@ -431,7 +432,7 @@ async function uploadInstaller(file) {
   $('#uploadProgress').textContent = `Uploading ${file.name} (${(file.size / 1048576).toFixed(1)} MB)…`;
   try {
     await saveNow();
-    const res = await api.req('POST', `/api/jobs/${job.id}/installer-file`, fd);
+    const res = await api.req('POST', `/api/jobs/${encodeURIComponent(job.id)}/installer-file`, fd);
     job.source.custom_path = res.path;
     bindAll($('#srcCustom'));
     $('#uploadProgress').textContent = 'Uploaded to ' + res.path;
@@ -452,8 +453,34 @@ function renderAppDetails() {
   ].filter(r => r[1]);
   $('#installerSummary').innerHTML = rows.length
     ? `<dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>` : '';
-  $('#iconPreview').src = `/api/jobs/${job.id}/icon?t=${Date.now()}`;
+  renderFolderName();
+  $('#iconPreview').src = `/api/jobs/${encodeURIComponent(job.id)}/icon?t=${Date.now()}`;
   updateTitle();
+}
+
+// ---- package folder name (= job id = folder under the workspace)
+function renderFolderName() {
+  $('#folderName').value = job.id;
+  const ws = (settings.workspace || '').replace(/[\\/]+$/, '');
+  $('#folderPath').textContent = ws ? `Folder: ${ws}\\${job.id}` : '';
+}
+function suggestFolderName() {
+  const name = defaultDisplayName() || job.source.winget_id || '';
+  return name.replace(/[\\/:*?"<>|#%&]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '');
+}
+async function renameFolder() {
+  const name = $('#folderName').value.trim();
+  if (!name || name === job.id) { renderFolderName(); return; }
+  try {
+    await saveNow();
+    job = await api.post(`/api/jobs/${encodeURIComponent(job.id)}/rename`, { name });
+    location.hash = `job=${encodeURIComponent(job.id)}&step=${step}`;
+    bindAll();
+    renderFolderName();
+    toast(`Package folder renamed to "${job.id}"`);
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 // Same rule as uploader.display_name(): don't repeat the vendor when the name already starts with it
@@ -505,7 +532,7 @@ function insertSnippet(name) {
 async function previewScript() {
   try {
     await saveNow();
-    const res = await api.post(`/api/jobs/${job.id}/preview`, job);
+    const res = await api.post(`/api/jobs/${encodeURIComponent(job.id)}/preview`, job);
     $('#previewText').textContent = res.script;
     $('#dlgPreview').showModal();
   } catch (e) { toast(e.message, true); }
@@ -534,7 +561,7 @@ function refreshCommandPreview() {
   clearTimeout(cmdTimer);
   cmdTimer = setTimeout(async () => {
     try {
-      const r = await api.post(`/api/jobs/${job.id}/commands`, job);
+      const r = await api.post(`/api/jobs/${encodeURIComponent(job.id)}/commands`, job);
       $('[data-preview="install"]').textContent = r.install_command;
       $('[data-preview="uninstall"]').textContent = r.uninstall_command;
     } catch { /* ignore */ }
@@ -657,7 +684,7 @@ function ruleErrors() {
 
 async function genScript(i) {
   const name = job.installer?.display_name || job.app.name;
-  const r = await api.post(`/api/jobs/${job.id}/detection-script`, { name, version: job.app.version });
+  const r = await api.post(`/api/jobs/${encodeURIComponent(job.id)}/detection-script`, { name, version: job.app.version });
   job.detection.rules[i].content = r.script;
   renderRules();
   scheduleSave();
@@ -673,6 +700,55 @@ function renderReturnCodes() {
 }
 
 // ---------------------------------------------------------------- step 5: build
+// ---- saved app customisations (profiles.py)
+async function renderProfileInfo() {
+  const box = $('#profileInfo');
+  const a = job.profile?.applied;
+  if (a) {
+    box.innerHTML = `<p class="banner ok">Customisations saved from version ${esc(a.version || '?')} were applied:
+      ${esc((a.items || []).join(', ') || 'dialog settings')}. Review them below.</p>`;
+    return;
+  }
+  box.innerHTML = '';
+  try {
+    const p = await api.get(`/api/jobs/${encodeURIComponent(job.id)}/profile`);
+    if (p.exists && step === 3) {
+      box.innerHTML = `<p class="banner">Saved customisations exist for this app (version ${esc(p.version || '?')}:
+        ${esc(p.items.join(', ') || 'dialog settings')}). They are applied to new packages of this app.</p>`;
+    }
+  } catch { /* informational only */ }
+}
+
+async function renderProfileList() {
+  const box = $('#profileList');
+  try {
+    const list = await api.get('/api/profiles');
+    box.innerHTML = list.length ? list.map(p => `<div class="list-row">
+        <div class="grow"><b>${esc(p.app)}</b> <span class="muted small">v${esc(p.version || '?')} · ${esc((p.saved || '').replace('T', ' '))}</span>
+          <div class="muted small">${esc(p.items.join(', ') || 'dialog settings')}</div></div>
+        <button class="btn ghost danger small" data-forget-profile="${esc(p.key)}">Forget</button></div>`).join('')
+      : '<p class="muted small">None yet – they are saved when a package is built.</p>';
+  } catch (e) { box.innerHTML = `<p class="banner bad">${esc(e.message)}</p>`; }
+}
+
+function exportTarget() {
+  const root = (job.package?.output_dir || '').trim().replace(/[\\/]+$/, '');
+  if (!root) return '';
+  const clean = v => (v || '').trim().replace(/[^\w.\-]/g, '_').replace(/^[._]+|[._]+$/g, '');
+  const a = job.app;
+  const vendor = (a.vendor || '').trim(); const name = (a.name || '').trim();
+  const v = vendor && name.toLowerCase().startsWith(vendor.toLowerCase()) ? '' : vendor;
+  return `${root}\\${clean([v, name].filter(Boolean).join(' ')) || 'App'}\\${clean(a.version) || 'unversioned'}`;
+}
+function renderExportHint() {
+  const t = exportTarget();
+  $('#outputDirHint').textContent = t
+    ? `After each build, the PSADT package and the .intunewin are also copied to ${t}`
+    : 'Optional: after each build, the PSADT package and the .intunewin are also copied to <folder>\\<App>\\<Version>.';
+  $('#btnExport').disabled = busy || !t || !job.status.packaged;
+  $('#btnOpenExport').disabled = !job.status.export_dir;
+}
+
 function renderBuild() {
   const s = job.status;
   const rows = [
@@ -684,6 +760,8 @@ function renderBuild() {
     : s.package_dir ? '<p class="banner warn">Settings changed since the last build – rebuild the package.</p>' : '')
     + `<dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`;
   $('#btnBuild').textContent = s.packaged ? 'Rebuild package' : 'Build package';
+  if (s.export_dir) $('#buildSummary dl').insertAdjacentHTML('beforeend', `<dt>Custom folder</dt><dd>${esc(s.export_dir)}</dd>`);
+  renderExportHint();
 }
 
 // ---------------------------------------------------------------- step 6: test
@@ -727,7 +805,7 @@ async function useEntry(i, kind) {
   const e = asArray(job.status.test_result?.new_entries)[i];
   if (!e) return;
   if (kind === 'uninstall') {
-    const r = await api.post(`/api/jobs/${job.id}/uninstall-code`,
+    const r = await api.post(`/api/jobs/${encodeURIComponent(job.id)}/uninstall-code`,
       { name: e.DisplayName, key_name: e.KeyName, windows_installer: e.WindowsInstaller });
     const cur = (job.script.sections.uninstall || '').trim();
     // Replace the auto-generated default (or nothing); otherwise append, so multiple components can be added
@@ -746,7 +824,7 @@ async function useEntry(i, kind) {
     rule = { type: 'registry', key: e.KeyPath.replace(/\\WOW6432Node/i, ''), value_name: 'DisplayVersion',
       detection_type: e.DisplayVersion ? 'version' : 'exists', operator: 'greaterThanOrEqual', value: e.DisplayVersion || '', check32: is32 };
   } else {
-    const r = await api.post(`/api/jobs/${job.id}/detection-script`, { name: e.DisplayName, version: e.DisplayVersion });
+    const r = await api.post(`/api/jobs/${encodeURIComponent(job.id)}/detection-script`, { name: e.DisplayName, version: e.DisplayVersion });
     rule = { type: 'script', content: r.script, run32: false, enforce_signature: false };
   }
   if (!confirm(`Replace the current detection rules with this ${kind} rule? You'll need to re-run the test.`)) return;
@@ -774,7 +852,7 @@ function renderUpload() {
   const name = job.app.display_name || defaultDisplayName();
   const testPill = !job.test.enabled ? '<span class="pill warn">Skipped</span>'
     : s.tested ? '<span class="pill ok">Passed</span>' : '<span class="pill bad">Not passed</span>';
-  api.post(`/api/jobs/${job.id}/commands`, job).then(c => {
+  api.post(`/api/jobs/${encodeURIComponent(job.id)}/commands`, job).then(c => {
     $('#uploadSummary').innerHTML = `<dl class="kv">
       <dt>Display name</dt><dd>${esc(name)}</dd>
       <dt>Package</dt><dd>${esc(s.intunewin)}</dd>
@@ -866,7 +944,7 @@ async function showHome() {
     const s = j.status || {};
     const pill = (on, l) => `<span class="pill ${on ? 'ok' : 'idle'}">${l}</span>`;
     return `<div class="job"><div class="meta"><div class="name">${esc(j.name)}</div>
-      <div class="muted small">${esc(j.created)} · step ${j.step}/7</div></div>
+      <div class="muted small">${esc(j.created)} · step ${j.step}/7 · folder <code>${esc(j.id)}</code></div></div>
       ${pill(s.fetched, 'Source')} ${pill(s.packaged, 'Built')} ${s.tested === false ? '<span class="pill bad">Test failed</span>' : pill(s.tested, 'Tested')} ${pill(s.uploaded, 'Uploaded')}
       <button class="btn" data-open-job="${esc(j.id)}">Open</button>
       <button class="btn ghost danger" data-delete-job="${esc(j.id)}">Delete</button></div>`;
@@ -874,22 +952,102 @@ async function showHome() {
   loadPrereqs();
 }
 
-async function loadPrereqs() {
+// ---- System check (scripts/Check-Prerequisites.ps1): everything needed on this PC, with fixes
+let sysChecked = false;
+async function loadPrereqs(force = false) {
+  if (sysChecked && !force) return;
+  sysChecked = true;
+  $('#scSummary').textContent = 'checking…';
+  $('#scSummary').className = 'muted';
   try {
-    const p = await api.get('/api/prereqs');
-    const item = (ok, label, hint) => `<span class="pill ${ok ? 'ok' : 'warn'}" title="${esc(hint)}">${ok ? '✓' : '!'} ${label}</span>`;
-    $('#prereqs').innerHTML = [
-      item(p.template, 'PSADT template', p.template_dir),
-      item(p.winget, 'winget', 'Required for winget sources'),
-      item(p.sandbox, 'Windows Sandbox', 'Enable the Windows Sandbox optional feature'),
-      item(p.intunewin_util, 'IntuneWinAppUtil', 'Downloaded automatically on first build'),
-      item(p.graph_module, 'Microsoft.Graph.Authentication', 'Installed automatically on first upload'),
-    ].join('');
+    const r = await api.get('/api/system-check');
+    renderSystemCheck(r);
+  } catch (e) {
+    $('#scSummary').textContent = 'could not run: ' + e.message;
+    $('#scSummary').className = 'pill bad';
+    $('#syscheck').open = true;
+  }
+  loadAuthModeForTest();
+}
+
+function renderSystemCheck(r) {
+  const checks = r.checks || [];
+  const bad = checks.filter(c => c.status === 'fail');
+  const warn = checks.filter(c => c.status === 'warn');
+  const s = $('#scSummary');
+  if (bad.length) { s.textContent = `${bad.length} problem${bad.length > 1 ? 's' : ''}: ${bad.map(c => c.name).join(', ')}`; s.className = 'pill bad'; }
+  else if (warn.length) { s.textContent = `ready, ${warn.length} note${warn.length > 1 ? 's' : ''}`; s.className = 'pill warn'; }
+  else { s.textContent = `all ${checks.length} checks passed`; s.className = 'pill ok'; }
+  if (bad.length) $('#syscheck').open = true;
+  const icon = { ok: '✓', warn: '!', fail: '✗' };
+  let area = '';
+  $('#scList').innerHTML = checks.map(c => {
+    const head = c.area !== area ? `<div class="sc-area">${esc(area = c.area)}</div>` : '';
+    const tags = [c.admin ? 'admin' : '', c.reboot ? 'restart' : ''].filter(Boolean).join(', ');
+    const fix = c.fix && c.status !== 'ok'
+      ? `<button class="btn small" data-sysfix="${esc(c.id)}">${esc(c.fix)}${tags ? ` (${tags})` : ''}</button>` : '';
+    return `${head}<div class="sc-row"><span class="pill ${c.status === 'ok' ? 'ok' : c.status === 'warn' ? 'warn' : 'bad'}">${icon[c.status]}</span>
+      <b>${esc(c.name)}</b><span class="muted small grow">${esc(c.detail)}</span>${fix}</div>`;
+  }).join('');
+}
+
+async function sysFix(id, btn) {
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'Working…';
+  try {
+    const r = await api.post('/api/system-fix', { id });
+    toast(r.message || 'Done');
+  } catch (e) {
+    toast(e.message, true);
+  }
+  btn.textContent = label;
+  await loadPrereqs(true);
+}
+
+async function loadAuthModeForTest() {
+  try {
+    const a = await api.get('/api/auth-config');
+    $('#scSecret').classList.toggle('hidden', a.auth_mode !== 'secret');
+    $('#btnIntuneTest').title = `Signs in with auth mode '${a.auth_mode}' from config.yaml` +
+      (a.auth_mode === 'interactive' ? ' – a Windows sign-in window will open' : '');
   } catch { /* ignore */ }
 }
 
+async function intuneTest() {
+  const btn = $('#btnIntuneTest');
+  const logEl = $('#log-intune');
+  btn.disabled = true;
+  logEl.classList.remove('hidden');
+  logEl.innerHTML = '';
+  $('#scIntune').innerHTML = '';
+  try {
+    await api.post('/api/intune-test', { client_secret: $('#scSecret').value });
+    let shown = 0;
+    for (;;) {
+      await sleep(1000);
+      const t = await api.get('/api/intune-test');
+      appendLog(logEl, t.log.slice(shown));
+      shown = t.log.length;
+      if (!t.running) {
+        const r = t.result || {};
+        const ok = r.connected && r.apps;
+        $('#scIntune').innerHTML = `<p class="banner ${ok ? 'ok' : 'bad'}">${ok
+          ? `✓ Connected to tenant ${esc(r.tenantId)} as ${esc(r.account)} – Intune upload will work.${r.groups ? ' Group names can be used in assignments.' : ' Use group object IDs in assignments (no Group.Read.All).'}`
+          : `✗ ${esc(r.error || (r.connected ? 'Signed in, but the account/app has no permission to manage Intune apps (DeviceManagementApps.ReadWrite.All).' : 'Connection failed.'))}`}</p>`;
+        break;
+      }
+    }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    $('#scSecret').value = '';
+  }
+}
+
 async function openJob(id, n) {
-  job = await api.get(`/api/jobs/${id}`);
+  job = await api.get(`/api/jobs/${encodeURIComponent(id)}`);
   show('wizard');
   bindAll();
   updateTitle();
@@ -906,6 +1064,12 @@ function init() {
   $('#snippetSelect').insertAdjacentHTML('beforeend', Object.keys(SNIPPETS).map(k => `<option>${esc(k)}</option>`).join(''));
 
   $('#btnHome').onclick = goHome;
+  $('#btnRecheck').onclick = () => loadPrereqs(true);
+  $('#btnIntuneTest').onclick = intuneTest;
+  $('#btnRenameFolder').onclick = renameFolder;
+  $('#btnSuggestFolder').onclick = () => { $('#folderName').value = suggestFolderName(); };
+  $('#folderName').addEventListener('keydown', e => { if (e.key === 'Enter') renameFolder(); });
+  $('#btnExport').onclick = async () => { if (await runTask('export')) toast('Package copied to the custom folder'); };
   initTheme();
   $('#btnFinish').onclick = goHome;
   $('#brand').onclick = goHome;
@@ -920,9 +1084,9 @@ function init() {
     const fd = new FormData(); fd.append('file', f);
     try {
       await saveNow();
-      const r = await api.req('POST', `/api/jobs/${job.id}/icon`, fd);
+      const r = await api.req('POST', `/api/jobs/${encodeURIComponent(job.id)}/icon`, fd);
       job.app.icon_path = r.path;
-      $('#iconPreview').src = `/api/jobs/${job.id}/icon?t=${Date.now()}`;
+      $('#iconPreview').src = `/api/jobs/${encodeURIComponent(job.id)}/icon?t=${Date.now()}`;
       await saveNow();
     } catch (err) { toast(err.message, true); }
   };
@@ -956,13 +1120,13 @@ function init() {
 
   // delegated clicks
   document.addEventListener('click', async e => {
-    const t = e.target.closest('[data-goto],[data-open-job],[data-delete-job],[data-add-rule],[data-remove-rule],[data-remove-rc],[data-remove-assign],[data-reset],[data-gen-script],[data-use-entry],[data-open],[data-close],tr[data-id]');
+    const t = e.target.closest('[data-goto],[data-open-job],[data-delete-job],[data-add-rule],[data-remove-rule],[data-remove-rc],[data-remove-assign],[data-reset],[data-gen-script],[data-use-entry],[data-open],[data-close],[data-forget-profile],[data-sysfix],tr[data-id]');
     if (!t) return;
     const d = t.dataset;
     if (d.goto) goStep(Number(d.goto));
     else if (d.openJob) openJob(d.openJob);
     else if (d.deleteJob) {
-      if (confirm('Delete this package and all its files?')) { await api.del(`/api/jobs/${d.deleteJob}`); showHome(); }
+      if (confirm('Delete this package and all its files?')) { await api.del(`/api/jobs/${encodeURIComponent(d.deleteJob)}`); showHome(); }
     } else if (d.addRule) {
       job.detection.rules.push(newRule(d.addRule)); renderRules(); scheduleSave();
     } else if (d.removeRule !== undefined) {
@@ -982,9 +1146,15 @@ function init() {
     } else if (d.useEntry !== undefined) {
       useEntry(Number(d.useEntry), d.kind);
     } else if (d.open) {
-      api.post(`/api/jobs/${job.id}/open`, { what: d.open }).catch(err => toast(err.message, true));
+      api.post(`/api/jobs/${encodeURIComponent(job.id)}/open`, { what: d.open }).catch(err => toast(err.message, true));
     } else if (d.close !== undefined) {
       t.closest('dialog').close();
+    } else if (d.sysfix) {
+      sysFix(d.sysfix, t);
+    } else if (d.forgetProfile) {
+      if (confirm('Forget the saved customisations for this app? New versions will start from the defaults.')) {
+        api.del(`/api/profiles/${encodeURIComponent(d.forgetProfile)}`).then(renderProfileList).catch(err => toast(err.message, true));
+      }
     } else if (d.id) {
       job.source.winget_id = d.id; job.source.version = '';
       $$('#wgResults tr').forEach(r => r.classList.toggle('selected', r === t));
@@ -1001,6 +1171,7 @@ function init() {
       const v = settings[el.dataset.setting];
       if (el.type === 'checkbox') el.checked = !!v; else el.value = v ?? '';
     });
+    renderProfileList();
     $('#dlgSettings').showModal();
   };
   $('#btnSaveSettings').onclick = async () => {
@@ -1020,7 +1191,7 @@ function init() {
   settings = await api.get('/api/settings').catch(() => ({}));
   const m = /job=([^&]+)(?:&step=(\d+))?/.exec(location.hash);
   if (m) {
-    try { await openJob(m[1], Number(m[2]) || 0); return; } catch { /* fall through */ }
+    try { await openJob(decodeURIComponent(m[1]), Number(m[2]) || 0); return; } catch { /* fall through */ }
   }
   showHome();
 })();

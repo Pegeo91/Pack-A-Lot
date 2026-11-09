@@ -4,6 +4,7 @@ Run:  python app.py   (opens http://127.0.0.1:5050)
 """
 from __future__ import annotations
 
+import json
 import os
 import threading
 import traceback
@@ -13,12 +14,14 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, request, send_from_directory
 
 import packager
+import profiles
 import psadt_script
 import tester
 import uploader
 import winget_client
-from common import (CONFIG_FILE, STATIC_DIR, delete_job, job_dir, list_jobs, load_auth_config, load_job,
-                    load_settings, new_job_config, save_auth_config, save_job, save_settings, timestamp)
+from common import (CONFIG_FILE, ROOT, SCRIPTS_DIR, STATIC_DIR, capture, delete_job, job_dir, list_jobs,
+                    load_auth_config, load_job, load_settings, new_job_config, powershell_cmd, rename_job,
+                    save_auth_config, save_job, save_settings, timestamp)
 
 HOST, PORT = "127.0.0.1", int(os.environ.get("PACKALOT_PORT", "5050"))
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="/static")
@@ -44,6 +47,7 @@ TASKS: dict[str, Task] = {}
 TASK_FUNCS = {
     "fetch": packager.prepare_source,
     "build": packager.build_package,
+    "export": packager.export_package,
     "test": tester.run_test,
     "upload": None,  # needs extra auth args, see start_task
 }
@@ -98,6 +102,68 @@ def prereqs():
         "template_dir": str(template),
         "workspace": s["workspace"],
     })
+
+
+# --------------------------------------------------------------------------- system check (new PC setup)
+CHECK_SCRIPT = SCRIPTS_DIR / "Check-Prerequisites.ps1"
+FIXABLE = {"sandbox", "winget", "graph_module", "intunewin"}
+
+
+def _ps_json(args: list[str], timeout: int) -> object:
+    code, out = capture(powershell_cmd(CHECK_SCRIPT, *args), timeout=timeout)
+    line = next((ln for ln in reversed(out.strip().splitlines()) if ln.strip()[:1] in "[{"), "")
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"System check failed (exit {code}): {out.strip()[-500:]}") from None
+
+
+@app.get("/api/system-check")
+def system_check():
+    try:
+        return jsonify(_ps_json(["-Json", "-Root", str(ROOT)], timeout=180))
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/api/system-fix")
+def system_fix():
+    fix_id = (request.get_json(force=True) or {}).get("id", "")
+    if fix_id not in FIXABLE:
+        return jsonify({"error": f"No automatic fix for '{fix_id}'."}), 400
+    try:
+        res = _ps_json(["-Json", "-Fix", fix_id, "-Root", str(ROOT)], timeout=60 * 15)
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+    res = (res or [{}])[0] if isinstance(res, list) else res
+    return jsonify(res), (200 if res.get("ok") else 500)
+
+
+INTUNE_TEST = {"running": False, "log": [], "result": None}
+
+
+@app.post("/api/intune-test")
+def intune_test():
+    if INTUNE_TEST["running"]:
+        return jsonify({"error": "A connection test is already running."}), 409
+    body = request.get_json(force=True) or {}
+    INTUNE_TEST.update(running=True, log=[], result=None)
+
+    def work():
+        try:
+            INTUNE_TEST["result"] = uploader.test_connection(lambda m: INTUNE_TEST["log"].append(m), body)
+        except Exception as exc:  # noqa: BLE001
+            INTUNE_TEST["result"] = {"connected": False, "error": str(exc)}
+        finally:
+            INTUNE_TEST["running"] = False
+
+    threading.Thread(target=work, daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/intune-test")
+def intune_test_status():
+    return jsonify(INTUNE_TEST)
 
 
 @app.get("/api/settings")
@@ -193,6 +259,20 @@ def _invalidate(old: dict, new: dict) -> None:
         status["tested"] = None
     if pkg_changed or test_changed:
         status["uploaded"] = False
+
+
+@app.post("/api/jobs/<job_id>/rename")
+def jobs_rename(job_id):
+    if job_id in TASKS and TASKS[job_id].state == "running":
+        return jsonify({"error": "Wait for the running task to finish before renaming."}), 409
+    name = (request.get_json(force=True) or {}).get("name", "")
+    try:
+        job = rename_job(job_id, name)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if job_id in TASKS and job["id"] != job_id:
+        TASKS[job["id"]] = TASKS.pop(job_id)  # keep the last task log visible
+    return jsonify(job)
 
 
 @app.delete("/api/jobs/<job_id>")
@@ -292,11 +372,33 @@ def open_folder(job_id):
         "package": Path(job["status"].get("package_dir") or job_dir(job_id)),
         "output": Path(job["status"].get("intunewin") or job_dir(job_id)).parent,
         "results": job_dir(job_id) / "test" / "results",
+        "export": Path(job["status"].get("export_dir") or job.get("package", {}).get("output_dir") or job_dir(job_id)),
     }
     path = paths.get(what, job_dir(job_id))
     if path.exists():
         os.startfile(str(path))  # noqa: S606 - local desktop app
     return jsonify({"path": str(path)})
+
+
+# --------------------------------------------------------------------------- saved app profiles
+@app.get("/api/profiles")
+def profiles_list():
+    return jsonify(profiles.list_profiles())
+
+
+@app.get("/api/jobs/<job_id>/profile")
+def job_profile(job_id):
+    job = load_job(job_id)
+    key = profiles.profile_key(job)
+    p = profiles.load_profile(key) if key else None
+    return jsonify({"key": key, "exists": bool(p), "version": (p or {}).get("version", ""),
+                    "saved": (p or {}).get("saved", ""), "items": profiles.summary(p) if p else []})
+
+
+@app.delete("/api/profiles/<key>")
+def profiles_delete(key):
+    profiles.delete_profile(key)
+    return jsonify({"ok": True})
 
 
 # --------------------------------------------------------------------------- tasks

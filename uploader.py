@@ -244,6 +244,38 @@ def run_upload(job: dict, log: LogFn, auth: dict | None = None) -> dict:
     return job
 
 
+def test_connection(log: LogFn, auth: dict | None = None) -> dict:
+    """Sign in with the configured app registration and check the Intune / group permissions."""
+    auth = {**load_auth_config(), **{k: v for k, v in (auth or {}).items() if v not in (None, "")}}
+    mode = auth.get("auth_mode") or "interactive"
+    if mode in ("secret", "certificate") and not (auth.get("tenant_id") and auth.get("client_id")):
+        raise ValueError("Tenant ID and Client ID are required for app-only authentication (config.yaml).")
+    env = {}
+    if mode == "secret":
+        secret = auth.get("client_secret") or os.environ.get("PACKALOT_CLIENT_SECRET", "")
+        if not secret:
+            raise ValueError("Enter the client secret to test 'secret' authentication.")
+        env["PACKALOT_CLIENT_SECRET"] = secret
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="packalot-auth-") as tmp:
+        cfg = Path(tmp) / "auth.json"
+        cfg.write_text(json.dumps({"auth": {"mode": mode, "tenantId": auth.get("tenant_id", ""),
+                                            "clientId": auth.get("client_id", ""),
+                                            "certThumbprint": auth.get("cert_thumbprint", "")}}), encoding="utf-8")
+        result: dict = {}
+
+        def capture_log(line: str) -> None:
+            nonlocal result
+            if line.startswith("RESULT:"):
+                result = json.loads(line[len("RESULT:"):])
+            else:
+                log(line)
+
+        run_process(powershell_cmd(SCRIPTS_DIR / "Test-IntuneConnection.ps1", "-ConfigPath", str(cfg)),
+                    capture_log, env=env, timeout=60 * 10, console=(mode == "interactive"))
+    return result or {"connected": False, "error": "No result from the connection test."}
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 1:
         print(__doc__)

@@ -58,14 +58,9 @@ function Invoke-BlobPut([string]$Uri, $Body, [string]$ContentType, [hashtable]$H
 
 try {
     # ------------------------------------------------------------------ 1. Graph module
-    if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
-        Write-Log 'Microsoft.Graph.Authentication not found - installing for CurrentUser...'
-        if (-not (Get-PackageProvider -ListAvailable -Name NuGet -ErrorAction SilentlyContinue)) {
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
-        }
-        Install-Module -Name Microsoft.Graph.Authentication -Scope CurrentUser -Repository PSGallery -Force -AllowClobber
-    }
-    Import-Module Microsoft.Graph.Authentication
+    . (Join-Path $PSScriptRoot 'PackALot.Graph.ps1')
+    $logFn = { param($m) Write-Log $m }
+    Install-PackALotGraphModule -Log $logFn
 
     # ------------------------------------------------------------------ 2. Connect
     $auth = $cfg.auth
@@ -78,50 +73,7 @@ try {
     $byName = @($assignObj.mobileAppAssignments | Where-Object { $_.target.groupId -and $_.target.groupId -notmatch $guidRx })
     $scopes = @('DeviceManagementApps.ReadWrite.All')
     if ($byName.Count) { $scopes += 'Group.Read.All' }
-    $connect = @{ NoWelcome = $true }
-    if ($auth.tenantId) { $connect.TenantId = $auth.tenantId }
-    switch ($auth.mode) {
-        'secret' {
-            if (-not $env:PACKALOT_CLIENT_SECRET) { throw 'Client secret not provided.' }
-            $sec = ConvertTo-SecureString $env:PACKALOT_CLIENT_SECRET -AsPlainText -Force
-            $connect.ClientSecretCredential = New-Object System.Management.Automation.PSCredential($auth.clientId, $sec)
-        }
-        'certificate' {
-            $connect.ClientId = $auth.clientId
-            $connect.CertificateThumbprint = $auth.certThumbprint
-        }
-        'devicecode' {
-            $connect.Scopes = $scopes
-            $connect.UseDeviceCode = $true
-            if ($auth.clientId) { $connect.ClientId = $auth.clientId }
-        }
-        default {
-            $connect.Scopes = $scopes
-            if ($auth.clientId) { $connect.ClientId = $auth.clientId }
-        }
-    }
-    Write-Log "Connecting to Microsoft Graph ($($auth.mode))..."
-    if ($auth.mode -eq 'interactive') {
-        # Interactive sign-in uses the Windows broker (WAM), which must attach its dialog to a window.
-        # uploader.py starts this script with its own console window for that reason
-        # (Set-MgGraphOption -DisableLoginByWAM is ignored by Microsoft.Graph.Authentication 2.41+).
-        try { $Host.UI.RawUI.WindowTitle = 'Pack-A-Lot - Microsoft sign-in (do not close)' } catch { }
-        Write-Log 'A Windows sign-in window will appear - complete the sign-in there.'
-        Connect-MgGraph @connect
-        # Signed in: minimise the helper console for the rest of the upload
-        try {
-            Add-Type -Namespace PackALot -Name Win -MemberDefinition @'
-[DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow();
-[DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
-'@
-            [void][PackALot.Win]::ShowWindow([PackALot.Win]::GetConsoleWindow(), 6)  # SW_MINIMIZE
-        } catch { }
-    }
-    else {
-        Connect-MgGraph @connect
-    }
-    $ctx = Get-MgContext
-    Write-Log "Connected. Tenant: $($ctx.TenantId)  Account/App: $(if ($ctx.Account) { $ctx.Account } else { $ctx.AppName })"
+    $ctx = Connect-PackALotGraph -Auth $auth -Scopes $scopes -Log $logFn
 
     # ------------------------------------------------------------------ 2b. Resolve group names
     # Done before anything is created, so a mistyped group name fails without leaving a half-made app

@@ -206,3 +206,17 @@ summary { cursor: pointer; font-weight: 600; }
 .installer-preview .btn { margin-top: 8px; }
 #confirmBody code { font-size: 12px; }
 #dlgConfirm { max-width: 560px; }
+
+/* System check (home) */
+.syscheck { margin-bottom: 18px; padding: 12px 18px; }
+.syscheck summary { cursor: pointer; display: flex; align-items: center; gap: 10px; list-style: none; }
+.syscheck summary::-webkit-details-marker { display: none; }
+.syscheck summary::before { content: "▸"; color: var(--muted); transition: transform .15s; }
+.syscheck[open] summary::before { transform: rotate(90deg); }
+.syscheck .sc-title { font-weight: 600; }
+.sc-area { margin: 12px 0 4px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.sc-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.sc-row b { min-width: 210px; font-weight: 500; }
+.sc-row .grow { flex: 1; min-width: 200px; word-break: break-word; }
+.sc-actions { margin-top: 12px; gap: 8px; }
+#scSecret { width: 260px; }

@@ -32,6 +32,8 @@ DEFAULT_SETTINGS: dict = {
     "template_dir": str(ROOT / "PSADT Template"),
     "intunewin_util": str(TOOLS_DIR / "IntuneWinAppUtil.exe"),
     "author": "",
+    # Optional root folder; each build is also copied to <root>/<Vendor App>/<Version>/
+    "default_output_dir": "",
     # auto = direct HTTPS download (URL + SHA256 from winget) with 'winget download' as fallback
     "download_method": "auto",  # auto | direct | winget
     # Windows Sandbox
@@ -105,6 +107,11 @@ def save_auth_config(values: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- settings
+# Paths inside the Pack-A-Lot folder: when the folder is copied to another PC (or moved), a saved absolute path
+# from the old location no longer exists - fall back to the copy next to the program instead.
+PORTABLE_PATH_KEYS = ("template_dir", "intunewin_util", "workspace")
+
+
 def load_settings() -> dict:
     settings = dict(DEFAULT_SETTINGS)
     if SETTINGS_FILE.exists():
@@ -112,6 +119,9 @@ def load_settings() -> dict:
             settings.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
             pass
+    for key in PORTABLE_PATH_KEYS:
+        if settings.get(key) and not Path(settings[key]).exists():
+            settings[key] = DEFAULT_SETTINGS[key]
     return settings
 
 
@@ -120,7 +130,9 @@ def save_settings(values: dict) -> dict:
     for key in DEFAULT_SETTINGS:
         if key in values:
             settings[key] = values[key]
-    SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    # Only store what differs from the defaults, so the defaults (paths next to the program) follow the folder
+    overrides = {k: v for k, v in settings.items() if k in DEFAULT_SETTINGS and v != DEFAULT_SETTINGS[k]}
+    SETTINGS_FILE.write_text(json.dumps(overrides, indent=2), encoding="utf-8")
     return settings
 
 
@@ -229,6 +241,10 @@ def new_job_config() -> dict:
         ],
         "test": {"enabled": True, "test_uninstall": True, "deploy_mode": "Silent", "keep_open": False},
         "assignments": [],
+        # Copy of the finished package outside the workspace (optional)
+        "package": {"output_dir": settings.get("default_output_dir", "")},
+        # Saved per-app customisations (profiles.py): remember = save them on build, applied = what was re-used
+        "profile": {"remember": True, "applied": None},
         "auto": {},  # last auto-generated defaults (used to avoid overwriting user edits)
         "status": {
             "fetched": False,
@@ -243,10 +259,66 @@ def new_job_config() -> dict:
     }
 
 
+INVALID_FOLDER_CHARS = set('\\/:*?"<>|#%&')  # Windows-invalid + characters that break the UI's URLs
+RESERVED_NAMES = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+
+
+def check_folder_name(name: str) -> str:
+    """Validate a job folder name (= the job id). Returns the cleaned name or raises ValueError."""
+    name = (name or "").strip().rstrip(". ")
+    if not name:
+        raise ValueError("Folder name is empty.")
+    if len(name) > 100:
+        raise ValueError("Folder name is too long (max 100 characters).")
+    bad = sorted({c for c in name if c in INVALID_FOLDER_CHARS or ord(c) < 32})
+    if bad:
+        raise ValueError("Folder name cannot contain: " + " ".join(bad))
+    if name.startswith(".") or name.split(".")[0].strip().lower() in RESERVED_NAMES:
+        raise ValueError(f"'{name}' is not a valid Windows folder name.")
+    return name
+
+
 def job_dir(job_id: str) -> Path:
-    if not job_id or any(c in job_id for c in "\\/:.") :
+    try:
+        valid = check_folder_name(job_id) == job_id
+    except ValueError:
+        valid = False
+    if not valid:
         raise ValueError("Invalid job id")
     return workspace() / job_id
+
+
+def _replace_paths(value, old: str, new: str):
+    """Rewrite every string that points inside the old job folder."""
+    if isinstance(value, dict):
+        return {k: _replace_paths(v, old, new) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_replace_paths(v, old, new) for v in value]
+    if isinstance(value, str) and value.lower().startswith(old.lower()):
+        rest = value[len(old):]
+        if not rest or rest[0] in "\\/":
+            return new + rest
+    return value
+
+
+def rename_job(job_id: str, new_name: str) -> dict:
+    """Rename the job folder (= the job id) and update all paths stored in job.json."""
+    new_name = check_folder_name(new_name)
+    if new_name == job_id:
+        return load_job(job_id)
+    old_dir, new_dir = job_dir(job_id), job_dir(new_name)
+    if new_dir.exists() and new_dir.resolve() != old_dir.resolve():
+        raise ValueError(f"A package folder named '{new_name}' already exists.")
+    job = load_job(job_id)
+    try:
+        old_dir.rename(new_dir)  # also handles a case-only rename on Windows
+    except PermissionError:
+        raise ValueError("The folder is in use (an Explorer window, the Sandbox or an open file). "
+                         "Close it and try again.") from None
+    job = _replace_paths(job, str(old_dir), str(new_dir))
+    job["id"] = new_name
+    save_job(job)
+    return job
 
 
 def load_job(job_id: str) -> dict:
@@ -267,7 +339,7 @@ def save_job(job: dict) -> None:
 
 def list_jobs() -> list[dict]:
     jobs = []
-    for d in sorted(workspace().iterdir(), reverse=True):
+    for d in workspace().iterdir():
         f = d / "job.json"
         if f.exists():
             try:
@@ -286,6 +358,8 @@ def list_jobs() -> list[dict]:
                 })
             except (OSError, json.JSONDecodeError, KeyError):
                 continue
+    # Newest first (folder names can be custom, so sort on the creation time)
+    jobs.sort(key=lambda j: j.get("created") or "", reverse=True)
     return jobs
 
 

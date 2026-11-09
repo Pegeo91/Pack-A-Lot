@@ -33,7 +33,17 @@
 
 <!-- ===================================================================== HOME -->
 <main id="home" class="container">
-  <div id="prereqs" class="prereqs"></div>
+  <details id="syscheck" class="card syscheck">
+    <summary><span class="sc-title">System check</span> <span id="scSummary" class="muted">checking…</span></summary>
+    <div id="scList"></div>
+    <div class="row wrap sc-actions">
+      <button class="btn" id="btnRecheck">Re-check</button>
+      <input type="password" id="scSecret" class="hidden" placeholder="Client secret (only for this test)" autocomplete="off">
+      <button class="btn" id="btnIntuneTest">Test Intune connection</button>
+    </div>
+    <div class="log hidden" id="log-intune"></div>
+    <div id="scIntune"></div>
+  </details>
   <div class="home-head">
     <h1>Packages</h1>
     <button class="btn primary" id="btnNew">+ New package</button>
@@ -106,6 +116,13 @@
   <section class="step card" data-step="2">
     <h2>App details</h2>
     <div id="installerSummary" class="info-box"></div>
+    <label>Package folder name</label>
+    <div class="row">
+      <input id="folderName" class="grow" placeholder="e.g. Mozilla Firefox 159.0" title="Name of this package's folder in the workspace">
+      <button class="btn" id="btnSuggestFolder" title="Fill in from vendor, name and version">Suggest</button>
+      <button class="btn" id="btnRenameFolder">Rename folder</button>
+    </div>
+    <p class="muted small" id="folderPath"></p>
     <div class="grid g3">
       <label>Vendor / Publisher * <input data-bind="app.vendor"></label>
       <label>Name * <input data-bind="app.name"></label>
@@ -144,6 +161,9 @@
         <button class="btn" id="btnPreview">Preview full script</button>
       </div>
     </div>
+    <div id="profileInfo"></div>
+    <label class="switch"><input type="checkbox" data-bind="profile.remember"><span></span>
+      Remember my custom sections &amp; settings for future versions of this app (saved when the package is built)</label>
 
     <div class="grid g2">
       <fieldset>
@@ -265,12 +285,19 @@
     <h2>Build package</h2>
     <p class="muted">Copies the PSADT template, adds the installer, generates <code>Invoke-AppDeployToolkit.ps1</code> and creates the <code>.intunewin</code>.</p>
     <div id="buildSummary" class="info-box"></div>
+    <label>Custom package folder (optional)
+      <input data-bind="package.output_dir" id="outputDir" placeholder="e.g. \\fileserver\Packages or D:\IntunePackages">
+    </label>
+    <p class="muted small" id="outputDirHint">After each build, the PSADT package and the .intunewin are also copied here.</p>
     <div class="row">
       <button class="btn primary" id="btnBuild">Build package</button>
       <button class="btn" data-open="package">Open package folder</button>
       <button class="btn" data-open="output">Open output folder</button>
+      <button class="btn" id="btnExport">Copy to custom folder</button>
+      <button class="btn" data-open="export" id="btnOpenExport">Open custom folder</button>
     </div>
     <div class="log" id="log-build"></div>
+    <div class="log hidden" id="log-export"></div>
   </section>
 
   <!-- STEP 6: TEST -->
@@ -351,6 +378,7 @@
   <label>PSADT template folder <input data-setting="template_dir"></label>
   <label>IntuneWinAppUtil.exe path <input data-setting="intunewin_util"></label>
   <label>Default script author <input data-setting="author"></label>
+  <label>Default custom package folder (new packages) <input data-setting="default_output_dir" placeholder="(none - keep packages in the workspace only)"></label>
   <label>Winget download method
     <select data-setting="download_method">
       <option value="auto">Direct download (hash-verified), fall back to winget download</option>
@@ -364,6 +392,9 @@
     <label class="switch"><input type="checkbox" data-setting="sandbox_networking"><span></span> Sandbox networking</label>
   </div>
   <div class="row end"><button class="btn primary" id="btnSaveSettings">Save</button></div>
+  <h3>Saved app customisations</h3>
+  <p class="muted small">Re-applied automatically when you package a new version of the same app.</p>
+  <div id="profileList"></div>
 </dialog>
 
 <dialog id="dlgConfirm" class="modal">
