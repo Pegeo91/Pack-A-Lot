@@ -22,6 +22,77 @@ function Write-Log([string]$Message) {
     Write-Host $line
 }
 
+# --------------------------------------------------------------------------- live log
+# A background runspace follows the PSADT / MSI log files while they are written and appends new lines to
+# results\live.log, which the host shows live in the browser. It is the only writer of live.log; the main
+# script hands it phase markers through a queue.
+$LiveLog = Join-Path $Results 'live.log'
+$LiveSync = [hashtable]::Synchronized(@{ Stop = $false; Queue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]' })
+
+function Start-LiveLog([string[]]$Dirs = @("$env:windir\Logs\Software", "$env:windir\Logs\PSAppDeployToolkit",
+                                             "$env:ProgramData\Logs\Software")) {
+    $rs = [runspacefactory]::CreateRunspace()
+    $rs.Open()
+    $ps = [powershell]::Create()
+    $ps.Runspace = $rs
+    [void]$ps.AddScript({
+        param($Sync, $Out, $Dirs)
+        $enc = New-Object Text.UTF8Encoding($false)
+        $writer = New-Object IO.StreamWriter($Out, $true, $enc)
+        $writer.AutoFlush = $true
+        $state = @{}      # file -> @{ Pos; Encoding }
+        $current = ''
+        while ($true) {
+            $item = $null
+            while ($Sync.Queue.TryDequeue([ref]$item)) { $writer.WriteLine("@@PHASE $item"); $current = '' }
+            foreach ($dir in $Dirs) {
+                if (-not (Test-Path -LiteralPath $dir)) { continue }
+                foreach ($f in Get-ChildItem -LiteralPath $dir -Recurse -File -Include *.log -ErrorAction SilentlyContinue) {
+                    try {
+                        $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite, Delete')
+                        try {
+                            if (-not $state.ContainsKey($f.FullName)) {
+                                $bom = New-Object byte[] 3
+                                $n = $fs.Read($bom, 0, 3)
+                                $isUtf16 = ($n -ge 2 -and $bom[0] -eq 0xFF -and $bom[1] -eq 0xFE)
+                                $isUtf8Bom = ($n -eq 3 -and $bom[0] -eq 0xEF -and $bom[1] -eq 0xBB -and $bom[2] -eq 0xBF)
+                                $state[$f.FullName] = @{ Pos = [long]$(if ($isUtf16) { 2 } elseif ($isUtf8Bom) { 3 } else { 0 })
+                                                         Encoding = $(if ($isUtf16) { [Text.Encoding]::Unicode } else { [Text.Encoding]::UTF8 }) }
+                            }
+                            $st = $state[$f.FullName]
+                            if ($fs.Length -lt $st.Pos) { $st.Pos = 0 }  # file was recreated
+                            if ($fs.Length -le $st.Pos) { continue }
+                            $fs.Position = $st.Pos
+                            $buf = New-Object byte[] ([int][math]::Min($fs.Length - $st.Pos, 4MB))
+                            $read = $fs.Read($buf, 0, $buf.Length)
+                            $text = $st.Encoding.GetString($buf, 0, $read)
+                            $cut = $text.LastIndexOf("`n")
+                            if ($cut -lt 0) { continue }  # wait until a whole line is written
+                            $chunk = $text.Substring(0, $cut + 1)
+                            $st.Pos += $st.Encoding.GetByteCount($chunk)
+                            if ($current -ne $f.FullName) { $writer.WriteLine("@@FILE $($f.Name)"); $current = $f.FullName }
+                            foreach ($line in $chunk.TrimEnd("`r", "`n") -split "`r?`n") { $writer.WriteLine($line) }
+                        }
+                        finally { $fs.Dispose() }
+                    }
+                    catch { }
+                }
+            }
+            if ($Sync.Stop) { break }
+            Start-Sleep -Milliseconds 700
+        }
+        $writer.Dispose()
+    }).AddArgument($LiveSync).AddArgument($LiveLog).AddArgument($Dirs)
+    $script:LiveHandle = @{ PS = $ps; Async = $ps.BeginInvoke() }
+}
+
+function Stop-LiveLog {
+    if (-not $script:LiveHandle) { return }
+    $LiveSync.Stop = $true
+    try { [void]$script:LiveHandle.Async.AsyncWaitHandle.WaitOne(5000) } catch { }
+    try { $script:LiveHandle.PS.Dispose() } catch { }
+}
+
 # --------------------------------------------------------------------------- helpers
 function Get-UninstallEntries {
     $roots = @(
@@ -165,8 +236,13 @@ function Test-Detection([string]$StepName, [bool]$ExpectDetected) {
 
 function Invoke-DeploymentStep([string]$StepName, [string]$Command) {
     Write-Log "$StepName > $Command"
+    $LiveSync.Queue.Enqueue($StepName)
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    $p = Start-Process -FilePath "$env:ComSpec" -ArgumentList "/s /c `"$Command`"" -WorkingDirectory $PkgLocal -Wait -PassThru -NoNewWindow
+    # Not 'Start-Process -Wait': in Windows PowerShell that waits for every process the installer started, so an
+    # installer that leaves something running (an updater, the app itself) would hang the test until the timeout.
+    $p = Start-Process -FilePath "$env:ComSpec" -ArgumentList "/s /c `"$Command`"" -WorkingDirectory $PkgLocal -PassThru -NoNewWindow
+    [void]$p.Handle  # keep the process handle so ExitCode is available after exit
+    $p.WaitForExit()
     $sw.Stop()
     $code = $p.ExitCode
     $type = ($Config.return_codes | Where-Object { [int]$_.code -eq $code } | Select-Object -First 1).type
@@ -186,6 +262,7 @@ try {
 
     $before = @(Get-UninstallEntries)
     $steps = New-Object System.Collections.ArrayList
+    Start-LiveLog
 
     [void]$steps.Add((Invoke-DeploymentStep 'Install' $Config.install_command))
     $afterInstall = @(Get-UninstallEntries)
@@ -222,6 +299,7 @@ catch {
     Write-Log "ERROR: $($result.error)"
 }
 finally {
+    Stop-LiveLog
     # Collect PSADT / MSI logs
     $logDest = Join-Path $Results 'logs'
     New-Item -ItemType Directory -Path $logDest -Force | Out-Null

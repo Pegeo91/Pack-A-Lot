@@ -318,6 +318,17 @@
     </div>
     <div id="testResult"></div>
     <div class="log" id="log-test"></div>
+    <details class="live-box" id="liveBox">
+      <summary><span class="live-title">Live install log</span> <span class="muted small">PSADT &amp; MSI logs from inside the Sandbox</span>
+        <span id="liveStatus" class="pill idle">no log yet</span></summary>
+      <div class="row wrap live-tools">
+        <label class="inline">Show <select id="liveFilter" autocomplete="off"><option value="">All log files</option></select></label>
+        <label class="switch"><input type="checkbox" id="liveErrorsOnly" autocomplete="off"><span></span> Warnings &amp; errors only</label>
+        <label class="switch"><input type="checkbox" id="liveFollow" checked autocomplete="off"><span></span> Auto-scroll</label>
+      </div>
+      <p class="banner warn small hidden" id="liveHidden"></p>
+      <div class="log live-log" id="liveLog"></div>
+    </details>
   </section>
 
   <!-- STEP 7: UPLOAD -->

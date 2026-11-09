@@ -223,6 +223,7 @@ async function followTask(name) {
   setBusy(true);
   let offset = 0;
   const jobId = job.id;
+  if (name === 'test') startLive(jobId);
   try {
     for (;;) {
       if (job?.id !== jobId) return false;  // user went Home / opened another package
@@ -238,6 +239,7 @@ async function followTask(name) {
       await sleep(1000);
     }
   } finally {
+    if (name === 'test') live.active = false;  // the live loop does a final read and stops
     setBusy(false);
   }
 }
@@ -272,7 +274,7 @@ const RENDER = {
   3: renderProfileInfo,
   4: () => { refreshCommandPreview(); renderRules(); renderReturnCodes(); },
   5: renderBuild,
-  6: renderTestResult,
+  6: () => { renderTestResult(); loadLiveLog(); },
   7: renderUpload,
 };
 
@@ -765,6 +767,110 @@ function renderBuild() {
 }
 
 // ---------------------------------------------------------------- step 6: test
+// ---- live install log (PSADT / MSI logs tailed inside the sandbox -> test/results/live.log)
+const LIVE_MAX_LINES = 6000;
+const live = { jobId: null, offset: 0, file: '', files: new Set(), active: false, loop: null, lines: 0 };
+
+function liveReset(jobId) {
+  Object.assign(live, { jobId, offset: 0, file: '', files: new Set(), lines: 0 });
+  $('#liveLog').innerHTML = '';
+  $('#liveFilter').innerHTML = '<option value="">All log files</option>';
+  $('#liveHidden').classList.add('hidden');
+  liveStatus();
+}
+function liveStatus() {
+  const st = $('#liveStatus');
+  if (live.active) { st.textContent = 'live'; st.className = 'pill ok live-dot'; }
+  else if (live.lines) { st.textContent = `${live.lines} lines`; st.className = 'pill idle'; }
+  else { st.textContent = 'no log yet'; st.className = 'pill idle'; }
+}
+function liveVisible(el) {
+  const f = $('#liveFilter').value;
+  const errorsOnly = $('#liveErrorsOnly').checked;
+  if (el.classList.contains('lv-phase')) return !errorsOnly;
+  return (!f || el.dataset.src === f) && (!errorsOnly || el.classList.contains('lv-warn') || el.classList.contains('lv-error'));
+}
+function liveApplyFilter() {
+  $$('#liveLog > div').forEach(el => el.classList.toggle('hidden', !liveVisible(el)));
+  liveHiddenNote();
+  if ($('#liveFollow').checked) $('#liveLog').scrollTop = $('#liveLog').scrollHeight;
+}
+// Make it obvious when the filters hide lines (an empty-looking log is confusing)
+function liveHiddenNote() {
+  const hidden = $$('#liveLog > .lv.hidden').length;
+  const note = $('#liveHidden');
+  note.classList.toggle('hidden', !hidden);
+  if (hidden) {
+    note.innerHTML = `${hidden} line${hidden > 1 ? 's are' : ' is'} hidden by the filter above. `
+      + '<a href="#" id="liveShowAll">Show all</a>';
+    $('#liveShowAll').onclick = e => {
+      e.preventDefault();
+      $('#liveFilter').value = '';
+      $('#liveErrorsOnly').checked = false;
+      liveApplyFilter();
+    };
+  }
+}
+function liveAppend(entries) {
+  const box = $('#liveLog');
+  const frag = document.createDocumentFragment();
+  for (const e of entries) {
+    if (e.kind === 'file') {
+      live.file = e.text;
+      if (!live.files.has(e.text)) { live.files.add(e.text); $('#liveFilter').add(new Option(e.text, e.text)); }
+      continue;
+    }
+    const el = document.createElement('div');
+    if (e.kind === 'phase') {
+      el.className = 'lv-phase';
+      el.textContent = `── ${e.text} ──`;
+    } else {
+      el.className = `lv lv-${e.level || 'info'}`;
+      el.dataset.src = live.file;
+      el.innerHTML = (e.time ? `<span class="lv-t">${esc(e.time)}</span>` : '') + esc(e.text);
+      live.lines++;
+    }
+    if (!liveVisible(el)) el.classList.add('hidden');
+    frag.appendChild(el);
+  }
+  box.appendChild(frag);
+  while (box.childElementCount > LIVE_MAX_LINES) box.removeChild(box.firstElementChild);
+  if (entries.length && $('#liveFollow').checked) box.scrollTop = box.scrollHeight;
+  if (entries.length) liveHiddenNote();
+}
+async function livePoll(jobId) {
+  const r = await api.get(`/api/jobs/${encodeURIComponent(jobId)}/live-log?offset=${live.offset}`);
+  if (job?.id !== jobId || live.jobId !== jobId) return null;
+  if (r.reset) liveReset(jobId);
+  live.offset = r.offset;
+  liveAppend(r.entries);
+  liveStatus();
+  return r;
+}
+function startLive(jobId) {
+  if (live.active && live.jobId === jobId) return;
+  liveReset(jobId);
+  live.active = true;
+  $('#liveBox').open = true;
+  liveStatus();
+  live.loop = (async () => {
+    while (live.active && job?.id === jobId) {
+      try { await livePoll(jobId); } catch { /* keep trying */ }
+      await sleep(1000);
+    }
+    // test finished: read whatever is left
+    try { let r; do { r = await livePoll(jobId); } while (r?.more); } catch { /* ignore */ }
+    live.active = false;
+    liveStatus();
+  })();
+}
+// Opening the Test step: show the log of the last run (if not already following a running test)
+async function loadLiveLog() {
+  if (live.active || live.jobId === job.id) return;
+  liveReset(job.id);
+  try { let r; do { r = await livePoll(job.id); } while (r?.more); } catch { /* ignore */ }
+}
+
 function renderTestResult() {
   const r = job.status.test_result;
   const box = $('#testResult');
@@ -1064,6 +1170,9 @@ function init() {
   $('#snippetSelect').insertAdjacentHTML('beforeend', Object.keys(SNIPPETS).map(k => `<option>${esc(k)}</option>`).join(''));
 
   $('#btnHome').onclick = goHome;
+  $('#liveFilter').onchange = liveApplyFilter;
+  $('#liveErrorsOnly').onchange = liveApplyFilter;
+  $('#liveFollow').onchange = () => { if ($('#liveFollow').checked) $('#liveLog').scrollTop = $('#liveLog').scrollHeight; };
   $('#btnRecheck').onclick = () => loadPrereqs(true);
   $('#btnIntuneTest').onclick = intuneTest;
   $('#btnRenameFolder').onclick = renameFolder;

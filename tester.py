@@ -9,6 +9,7 @@ CLI usage:
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -146,6 +147,46 @@ def run_test(job: dict, log: LogFn) -> dict:
     log("RESULT: " + ("SUCCESS" if result.get("success") else "FAILED"))
     job["status"].update({"tested": bool(result.get("success")), "test_result": result})
     return job
+
+
+# --------------------------------------------------------------------------- live log (written inside the sandbox)
+_CMTRACE = re.compile(r'^<!\[LOG\[(?P<msg>.*)\]LOG\]!><time="(?P<time>\d{1,2}:\d{2}:\d{2})[^"]*"'
+                      r'(?:[^>]*?component="(?P<comp>[^"]*)")?(?:[^>]*?type="(?P<type>\d)")?', re.S)
+_MSI_ERROR = re.compile(r"Return value 3|error \d{4}|failed", re.I)
+
+
+def _parse_live_line(line: str) -> dict:
+    line = line.lstrip("﻿")
+    if line.startswith("@@PHASE "):
+        return {"kind": "phase", "text": line[8:].strip()}
+    if line.startswith("@@FILE "):
+        return {"kind": "file", "text": line[7:].strip()}
+    m = _CMTRACE.match(line)
+    if m:
+        level = {"2": "warn", "3": "error"}.get(m.group("type") or "", "info")
+        return {"kind": "line", "time": m.group("time"), "text": m.group("msg"), "level": level}
+    return {"kind": "line", "text": line, "level": "error" if _MSI_ERROR.search(line) else "info"}
+
+
+def read_live_log(job_id: str, offset: int = 0, limit: int = 512 * 1024) -> dict:
+    """New complete lines of results/live.log from a byte offset (the browser polls this while testing)."""
+    path = job_dir(job_id) / "test" / "results" / "live.log"
+    if not path.exists():
+        return {"offset": 0, "entries": [], "reset": offset > 0, "exists": False}
+    size = path.stat().st_size
+    reset = offset > size  # a new test run replaced the file
+    if reset:
+        offset = 0
+    with path.open("rb") as fh:
+        fh.seek(offset)
+        data = fh.read(limit)
+    cut = data.rfind(b"\n")
+    if cut < 0:
+        return {"offset": offset, "entries": [], "reset": reset, "exists": True}
+    chunk = data[:cut + 1]
+    entries = [_parse_live_line(ln) for ln in chunk.decode("utf-8", errors="replace").splitlines() if ln.strip()]
+    return {"offset": offset + len(chunk), "entries": entries, "reset": reset, "exists": True,
+            "more": offset + len(chunk) < size}
 
 
 def main(argv: list[str]) -> int:

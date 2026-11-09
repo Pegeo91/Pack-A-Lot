@@ -220,3 +220,25 @@ summary { cursor: pointer; font-weight: 600; }
 .sc-row .grow { flex: 1; min-width: 200px; word-break: break-word; }
 .sc-actions { margin-top: 12px; gap: 8px; }
 #scSecret { width: 260px; }
+
+/* Live install log (step 6) - separate, collapsible panel */
+.live-box { margin-top: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); padding: 10px 14px; }
+.live-box summary { cursor: pointer; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; list-style: none; }
+.live-box summary::-webkit-details-marker { display: none; }
+.live-box summary::before { content: "\25B8"; color: var(--muted); transition: transform .15s; }
+.live-box[open] summary::before { transform: rotate(90deg); }
+.live-box .live-title { font-weight: 600; }
+.live-box #liveStatus { margin-left: auto; }
+.live-tools { margin: 10px 0 8px; gap: 14px; }
+.live-log { height: 520px; max-height: none; resize: vertical; }
+.live-log:empty { display: block; }
+.live-log:empty::before { content: "Waiting for the installer to write its log…"; color: #7d8ba1; }
+#liveHidden { margin: 0 0 8px; }
+.live-log .lv { white-space: pre-wrap; }
+.live-log .lv-t { color: #7d8ba1; margin-right: 8px; }
+.live-log .lv-warn { color: #f0c36b; }
+.live-log .lv-error { color: #ff8a80; }
+.live-log .lv-phase { color: #8ab4ff; font-weight: 600; margin: 8px 0 4px; }
+.live-dot::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: currentColor;
+  margin-right: 6px; animation: livepulse 1.2s infinite; vertical-align: middle; }
+@keyframes livepulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }

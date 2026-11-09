@@ -421,6 +421,15 @@ def start_task(job_id, name):
     return jsonify({"started": name})
 
 
+@app.get("/api/jobs/<job_id>/live-log")
+def live_log(job_id):
+    try:
+        offset = max(0, int(request.args.get("offset", "0")))
+    except ValueError:
+        offset = 0
+    return jsonify(tester.read_live_log(job_id, offset))
+
+
 @app.get("/api/jobs/<job_id>/task")
 def task_status(job_id):
     task = TASKS.get(job_id)
