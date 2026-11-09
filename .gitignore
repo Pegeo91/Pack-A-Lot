@@ -1,0 +1,8 @@
+﻿__pycache__/
+*.pyc
+settings.json
+config.yaml
+tools/
+workspace/
+build/
+Pack-A-Lot.exe
